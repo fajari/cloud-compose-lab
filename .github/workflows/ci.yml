@@ -1,0 +1,90 @@
+
+name: Compose FastAPI CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compose-ci-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    runs-on: self-hosted
+
+    timeout-minutes: 20
+
+    env:
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      COMPOSE_PROJECT_NAME: cloud-compose-ci
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check environment
+        run: |
+          python3 --version
+          docker --version
+          docker compose version
+
+      - name: Create Python virtual environment
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+
+      - name: Install dependencies
+        run: |
+          .venv/bin/python -m pip install -r app/requirements.txt
+          .venv/bin/python -m pip install pytest httpx
+
+      - name: Test FastAPI
+        run: |
+          .venv/bin/python -m pytest -q
+
+      - name: Validate Compose
+        run: |
+          docker compose config --quiet
+
+      - name: Build web image
+        run: |
+          docker compose build web
+
+      - name: Start services and smoke test
+        run: |
+          docker compose up -d --wait --wait-timeout 90
+
+          echo "=== Container Status ==="
+          docker compose ps
+
+          echo "=== Smoke Test FastAPI ==="
+          curl --noproxy '*' --ipv4 \
+            --fail --show-error \
+            --retry 8 \
+            --retry-all-errors \
+            --retry-delay 2 \
+            --retry-max-time 60 \
+            http://127.0.0.1:8000/
+
+      - name: Debug on failure
+        if: failure()
+        run: |
+          echo "=== Docker Compose ==="
+          docker compose ps -a
+
+          echo "=== Web Logs ==="
+          docker compose logs --tail=100 web
+
+          echo "=== DB Logs ==="
+          docker compose logs --tail=50 db
+
+      - name: Stop services
+        if: always()
+        run: |
+          docker compose down --remove-orphans
+
